@@ -110,10 +110,10 @@ The system consists of multiple Lambda functions (LF0, LF1, and LF2) with specif
 
 ## **Team Members**
 
-| Name              | Contact                      |
+| Name              | NYU NetID                    |
 |-------------------|------------------------------|
-| **Your Name**     | your-email@example.com       |
-| **Teammate 1**    | teammate1@example.com        |
+| Aditya Mittal     | am13294                      |
+| Affan Khamse      | ak10529                      |
 
 ---
 
