@@ -1,7 +1,3 @@
-Here’s the updated **README** with a **Team Members** section:
-
----
-
 # **Dining Concierge System with AWS Lambda, Lex, and SQS**
 
 ## **Overview**
