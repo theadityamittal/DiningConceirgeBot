@@ -11,97 +11,126 @@ logger.setLevel(logging.DEBUG)
 
 def lambda_handler(event, context):
     """
-    Lambda function to process messages from the SQS queue and send personalized
-    restaurant suggestions to the users.
+    Lambda function to process messages from SQS and send restaurant
+    suggestions to users via SES.
 
     Args:
-        event (dict): The Lambda event containing the message records.
-        context (object): The context of the Lambda function.
+        event (dict): Event data passed to the Lambda function.
+        context (Context): Context object containing information about the
+            Lambda function.
 
     Returns:
-        dict: A dictionary containing the response code and body.
+        dict: A dictionary containing the response to the invocation.
     """
-    logger.info("Scheduled Event from AWS EventBridge")
+    logger.info(event)
 
-    # Check if the event contains records
-    if 'Records' not in event:
-        logger.info("Queue Empty...")
+    result = sqs_receive_message()
+    logger.info(f"SQS receive_message: {result}")
+
+    if 'Messages' not in result:
         return {
             'statusCode': 200,
-            'body': json.dumps('Nothing to process in queue...')
+            'body': json.dumps('No messages in the queue')
         }
 
-    # Iterate through the messages in the event
-    for record in event['Records']:
-        message_body = json.loads(record['body'])
-        receipt_handle = record['receiptHandle']
+    for message in result['Messages']:
+        try:
+            dining_details = json.loads(message['Body'])
+            receipt_handle = message['ReceiptHandle']
 
-        logger.info(f"Processing message: {message_body}")
-        
-        cuisine = message_body['Cuisine']
-        host = os.getenv('ES_HOST')
-        url = f"{host}/_search"
-        query = {
-            "query": {
-                "match": {
-                    "Cuisine": {
-                        "query": cuisine.capitalize(),
-                        "operator": "and"
+            # Get list from elastic search
+            cuisine = dining_details['Cuisine']
+            host = os.getenv('ES_HOST')
+            url = f"{host}/_search"
+            query = {
+                "query": {
+                    "match": {
+                        "Cuisine": {
+                            "query": cuisine.capitalize(),
+                            "operator": "and"
+                        }
                     }
-                }
-            },
-            "size": 1000
-        }
-        headers = {"Content-Type": "application/json"}
+                },
+                "size": 1000
+            }
+            headers = {"Content-Type": "application/json"}
 
-        # Make the Elasticsearch request
-        es_response = requests.get(
-            url, headers=headers, data=json.dumps(query),
-            auth=(os.getenv('ES_USERNAME'), os.getenv('ES_PASSWORD'))
-        )
-        
-        logger.info(f"Elasticsearch response: {es_response}")
-
-        restaurant_data = es_response.json()
-        logger.info(f"Elasticsearch response body: {json.dumps(restaurant_data)}")
-        
-        if restaurant_data['hits']['total']['value'] > 0:
-            data_list = restaurant_data['hits']['hits']
-            random_list = [hit['_id'] for hit in data_list]
-
-            # Select 5 random restaurants
-            selected_restaurants = random.sample(random_list, k=5)
-            
-            logger.info(f"Selected Restaurants: {selected_restaurants}")
-
-            # Fetch full restaurant details from DynamoDB
-            dynamodb = boto3.resource('dynamodb')
-            restaurants_list = dynamodb.batch_get_item(
-                RequestItems={
-                    'yelp-restaurants': {'Keys': [{'business_id': id} for id in selected_restaurants]}
-                }
+            # Make the Elasticsearch request
+            es_response = requests.get(
+                url, headers=headers, data=json.dumps(query),
+                auth=(os.getenv('ES_USERNAME'), os.getenv('ES_PASSWORD'))
             )
 
-            logger.info(f"Fetched restaurant details: {restaurants_list}")
+            logger.info(f"Elasticsearch response: {es_response}")
 
-            # Send restaurant suggestions via SES
-            ses_send_mail(restaurants_list, message_body)
+            logger.info(es_response)
 
-            # Update past suggestions in DynamoDB
-            create_or_update_users_past_suggestions(
-                restaurants_list['Responses']['yelp-restaurants'], message_body
-            )
+            restaurant_data = es_response.json()
+            logger.info(f"Elasticsearch response body: {json.dumps(restaurant_data)}")
 
-        else:
-            logger.info(f"No restaurants found for cuisine: {cuisine}")
+            if restaurant_data['hits']['total']['value'] > 0:
+                data_list = restaurant_data['hits']['hits']
+                random_list = [hit['_id'] for hit in data_list]
 
-        # Delete the message from the SQS queue
-        sqs_delete_message(receipt_handle)
+                # Select 5 random restaurants
+                selected_restaurants = random.sample(random_list, k=5)
+
+                logger.info(f"Selected Restaurants: {selected_restaurants}")
+
+                # Fetch full restaurant details from DynamoDB
+                dynamodb = boto3.resource('dynamodb')
+                restaurants_list = dynamodb.batch_get_item(
+                    RequestItems={
+                        'yelp-restaurants': {'Keys': [{'business_id': id} for id in selected_restaurants]}
+                    }
+                )
+
+                logger.info(f"Fetched restaurant details: {restaurants_list}")
+
+                # Send restaurant suggestions via SES
+                ses_send_mail(restaurants_list, dining_details)
+
+                # Update past suggestions in DynamoDB
+                create_or_update_users_past_suggestions(
+                    restaurants_list['Responses']['yelp-restaurants'], dining_details
+                )
+
+            else:
+                logger.info(f"No restaurants found for cuisine: {cuisine}")
+
+        except Exception as e:
+            logger.error(f"Error processing message: {e}")
+            continue  # Skip to the next message in case of an error
+
+        finally:
+            # Delete the message from the SQS queue only after processing
+            sqs_delete_message(receipt_handle)
 
     return {
         'statusCode': 200,
         'body': json.dumps('Lambda executed successfully!')
     }
+
+def sqs_receive_message():
+    """
+    Receives messages from the SQS queue.
+
+    This function connects to SQS, receives messages from the specified queue,
+    and returns the result.
+
+    Returns:
+        dict: A dictionary containing the received messages.
+    """
+    sqs = boto3.client('sqs')
+    result = sqs.receive_message(
+        QueueUrl=os.environ.get('QUEUE_URL'),
+        MaxNumberOfMessages=10,
+        MessageAttributeNames=['All'],
+        VisibilityTimeout=40,
+        WaitTimeSeconds=10
+    )
+    return result
+
 
 def sqs_delete_message(receipt_handle):
     """
